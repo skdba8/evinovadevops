@@ -1,64 +1,79 @@
 import { Construct } from 'constructs';
 import {
-  Bucket,
-  BucketEncryption,
-  BucketProps,
-} from 'aws-cdk-lib/aws-s3';
-import {
-  Role,
-  WebIdentityPrincipal,
-  ManagedPolicy,
-  PolicyStatement,
-} from 'aws-cdk-lib/aws-iam';
-import { Stack, StackProps, CfnOutput } from 'aws-cdk-lib';
+  aws_s3 as s3,
+  aws_iam as iam,
+  aws_kms as kms,
+  CfnOutput,
+  Stack,
+} from 'aws-cdk-lib';
 
 export interface SecureBucketProps {
-  projectId: string;
-  enableVersioning?: boolean;
-  enableEncryption?: boolean;
-  githubRepo?: string; // Example:, 'username/reponame'
+  githubRepo: string;      // e.g., 'skdba8/evinovadevops'
+  bucketName: string;      // e.g., 'evinovadevops-secure-bucket'
+  kmsKeyArn: string;       // e.g., full KMS ARN
 }
 
 export class SecureBucket extends Construct {
-  public readonly bucketName: string;
-  public readonly oidcRoleArn?: string;
+  public readonly bucket: s3.IBucket;
+  public readonly oidcRole: iam.Role;
 
   constructor(scope: Construct, id: string, props: SecureBucketProps) {
     super(scope, id);
 
-    const bucket = new Bucket(this, 'SecureS3Bucket', {
-      bucketName: `${props.projectId}-my-bucket`,
-      versioned: props.enableVersioning ?? false,
-      encryption: props.enableEncryption
-        ? BucketEncryption.S3_MANAGED
-        : BucketEncryption.UNENCRYPTED,
+    const { githubRepo, bucketName, kmsKeyArn } = props;
+
+    // Import existing S3 bucket by name
+    this.bucket = s3.Bucket.fromBucketName(this, 'ImportedBucket', bucketName);
+
+    // Import existing KMS key by ARN
+    const encryptionKey = kms.Key.fromKeyArn(this, 'ImportedKmsKey', kmsKeyArn);
+
+    // Create GitHub OIDC IAM Role
+    this.oidcRole = new iam.Role(this, 'GitHubOIDCRole', {
+      roleName: `${bucketName}-oidc-role`,
+      description: `OIDC Role for GitHub Actions deployments from ${githubRepo}`,
+      assumedBy: new iam.WebIdentityPrincipal(
+        `arn:aws:iam::${Stack.of(this).account}:oidc-provider/token.actions.githubusercontent.com`,
+        {
+          "StringLike": {
+            "token.actions.githubusercontent.com:sub": `repo:${githubRepo}:*`
+          }
+        }
+      ),
     });
 
-    this.bucketName = bucket.bucketName;
+    // Attach scoped permissions to the OIDC role
+    this.oidcRole.addToPolicy(new iam.PolicyStatement({
+      actions: [
+        "s3:GetObject",
+        "s3:PutObject",
+        "s3:ListBucket"
+      ],
+      resources: [
+        `arn:aws:s3:::${bucketName}`,
+        `arn:aws:s3:::${bucketName}/*`
+      ],
+    }));
 
-    if (props.githubRepo) {
-      const oidcRole = new Role(this, 'GitHubOIDCRole', {
-        roleName: `${props.projectId}-github-oidc-role`,
-        assumedBy: new WebIdentityPrincipal('token.actions.githubusercontent.com').withConditions({
-          StringEquals: {
-            'token.actions.githubusercontent.com:aud': 'sts.amazonaws.com',
-            'token.actions.githubusercontent.com:sub': `repo:${props.githubRepo}:*`,
-          },
-        }),
-        managedPolicies: [
-          ManagedPolicy.fromAwsManagedPolicyName('AmazonS3FullAccess'),
-        ],
-      });
+    this.oidcRole.addToPolicy(new iam.PolicyStatement({
+      actions: [
+        "kms:Encrypt",
+        "kms:Decrypt",
+        "kms:GenerateDataKey",
+        "kms:DescribeKey"
+      ],
+      resources: [kmsKeyArn],
+    }));
 
-      this.oidcRoleArn = oidcRole.roleArn;
+    // Outputs
+    new CfnOutput(this, 'ImportedBucketName', {
+      value: this.bucket.bucketName,
+      description: 'Imported S3 bucket name',
+    });
 
-      new CfnOutput(this, 'OIDCRoleArn', {
-        value: this.oidcRoleArn,
-      });
-    }
-
-    new CfnOutput(this, 'BucketName', {
-      value: this.bucketName,
+    new CfnOutput(this, 'OIDCRoleArn', {
+      value: this.oidcRole.roleArn,
+      description: 'GitHub OIDC IAM Role ARN',
     });
   }
 }
