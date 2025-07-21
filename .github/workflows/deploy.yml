@@ -1,25 +1,25 @@
-name: Deploy to AWS with CDK
-
-on:
-  push:
-    branches: [main]
+name: Deploy CDK Stack
 
 permissions:
-  id-token: write       # Required for OIDC
-  contents: read        # Required to clone code
+  id-token: write
+  contents: read
 
 env:
   AWS_REGION: us-east-1
 
-jobs:
-  deploy:
-    runs-on: ubuntu-latest
+on:
+  push:
+    branches:
+      - main
 
+jobs:
+  lint-test-diff:
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout repo
         uses: actions/checkout@v3
 
-      - name: Set up Node.js
+      - name: Setup Node.js
         uses: actions/setup-node@v3
         with:
           node-version: '18'
@@ -27,17 +27,62 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Run unit tests
+      - name: Lint code
+        run: npm run lint
+
+      - name: Run tests
         run: npm test
 
-      - name: CDK Synth
-        run: npx cdk synth
+      - name: CDK Diff
+        run: |
+          set -e
+          npx cdk diff
+        continue-on-error: false
 
-      - name: Configure AWS credentials (OIDC)
+  deploy-dev:
+    needs: lint-test-diff
+    runs-on: ubuntu-latest
+    environment: dev
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v3
+
+      - name: Configure AWS Credentials (Dev)
         uses: aws-actions/configure-aws-credentials@v2
         with:
-          role-to-assume: arn:aws:iam::<AWS_ACCOUNT_ID>:role/evinovadevops-secure-bucket-oidc-role
+          role-to-assume: arn:aws:iam::248896117205:role/evinovadevops-github-oidc-role-dev
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Deploy CDK Stack (Dev)
+      - name: Deploy to Dev
+        run: npx cdk deploy --require-approval never
+
+  approval-prod:
+    needs: deploy-dev
+    runs-on: ubuntu-latest
+    environment:
+      name: prod
+      url: https://your-prod-url.example.com
+    steps:
+      - name: Manual approval for prod deploy
+        uses: hmarr/auto-approve-action@v3
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+  deploy-prod:
+    needs: approval-prod
+    runs-on: ubuntu-latest
+    environment:
+      name: prod
+      url: https://your-prod-url.example.com
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v3
+
+      - name: Configure AWS Credentials (Prod)
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          role-to-assume: arn:aws:iam::248896117205:role/evinovadevops-github-oidc-role-prod
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Deploy to Prod
         run: npx cdk deploy --require-approval never
